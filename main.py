@@ -1,0 +1,333 @@
+import argparse
+import run8
+import serial
+import serial.tools.list_ports
+import socket
+import time
+
+# Network/comms info
+run8port = 7766  # Must match Run 8 value in UI
+local_ip = '127.0.0.1'  # Run 8 only listens on local loopback interface
+
+# Deadband values to minimize propagating noise
+indy_deadband = 2
+auto_deadband = 2
+dyn_deadband = 2
+
+# "Constants" for readability
+button_up = 0
+button_down = 1
+off = 0
+on = 1
+reverser_forward = 1
+reverser_neutral = 2
+reverser_reverse = 0
+counter_up = 1
+counter_release = 0
+counter_down = 2
+
+# The miniRD uses an ADC input for toggle switches with resistor voltage divider; these values define breakpoints
+toggle_back = 50
+toggle_forward = 180
+
+# Timing values
+alerter_time = 30  # Seconds between auto-alerter virtual press
+
+
+def crc(blist):
+    # Generate CRC byte
+    res = 0
+    for b in blist:
+        res = res ^ b
+    return res
+
+
+def form_msg(typ, cmd, data):
+    # Form the message byte array
+    msg_arr = bytes([typ, 0, cmd, data, crc([typ, cmd, data])])
+    return msg_arr
+
+
+def update_state(out_sock, index, value, quiet=False, v_lvl=0):
+    # Send the update message using the run8.cmd_list array
+    if v_lvl > 1:
+        print(f'{run8.cmd_dict[run8.cmd_list[index]]} {value}')
+    if quiet:
+        out_sock.sendto(form_msg(run8.header_quiet, run8.cmd_list[index], int(value)), (local_ip, run8port))
+    else:
+        out_sock.sendto(form_msg(run8.header_sound, run8.cmd_list[index], int(value)), (local_ip, run8port))
+
+
+def update_raw_state(out_sock, index, value, quiet=False):
+    # Send the update message using a raw command value
+    if quiet:
+        out_sock.sendto(form_msg(run8.header_quiet, index, int(value)), (local_ip, run8port))
+    else:
+        out_sock.sendto(form_msg(run8.header_sound, index, int(value)), (local_ip, run8port))
+
+
+def alt_key_pressed(msg):
+    if msg[run8.cmd_list.index(run8.cmd_alerter)] == 0:
+        return False
+    else:
+        return True
+
+
+def find_com_ports():
+    com_ports = []
+    for port in serial.tools.list_ports.comports():
+        com_ports.append(port.device)
+    return com_ports
+
+
+def main():
+    # Keep track of lever positions
+    previous_indy = 255
+    previous_auto = 0
+    previous_dyn = 0
+    previous_throttle = 0
+    previous_reverser = 2
+    previous_counter = 0
+
+    # Keep track of latching / multivalued buttons
+    wiper_value = 0
+    sand_value = 0
+    slow_speed_value = 0
+    front_headlight_value = 0
+    rear_headlight_value = 0
+    step_light_value = 0
+    gauge_light_value = 0
+    cab_light_value = 0
+
+    # Used for periodically pressing alerter button so player can leave the cab
+    auto_alerter = False
+    alerter_pressed = False
+
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Python script to serve as miniRD daemon',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-p', '--port', help='Serial (COM) port the MiniRD is connected to (optional). \n'
+                                             'If left blank, this tool will poll all available serial ports.',
+                        default=None, type=str)
+    parser.add_argument('-v', '--verbosity', help=f'Verbosity level 0 (silent) to 3 (most verbose).',
+                        type=int, default=0)
+    args = parser.parse_args()
+    valid_port = args.port
+    verbosity = args.verbosity
+
+    # Find valid COM port
+    if not valid_port:
+        ports = find_com_ports()
+        if ports:
+            if verbosity > 0:
+                print("Available COM ports: {ports}".format(ports=ports))
+            for port in ports:
+                trying_port = True
+                if verbosity > 0:
+                    print(f"trying {port}:")
+                try:
+                    t_port = serial.Serial(port=port, baudrate=9600, timeout=1, write_timeout=1)
+                except serial.SerialException:
+                    if verbosity > 0:
+                        print('Port unreachable')
+                    trying_port = False
+
+                if trying_port:
+                    try:
+                        t_port.write(b'I\r\n')
+                    except serial.SerialTimeoutException:
+                        if verbosity > 0:
+                            print('Timeout')
+                        trying_port = False
+
+                if trying_port:
+                    in_line = t_port.readline().strip().decode('utf-8').split(',')
+                    if in_line[0] == 'miniRD':
+                        if verbosity > 0:
+                            print('----------------------------')
+                            print(f'Found miniRD on {port}, firmware version: {in_line[1]}')
+                        t_port.close()
+                        valid_port = port
+                    else:
+                        if verbosity > 0:
+                            print(f'Valid port found at {port}, but no miniRD responding.')
+                        t_port.close()
+                        time.sleep(2)
+
+            if not valid_port:
+                if verbosity > 0:
+                    print('No miniRD found on any COM port.')
+                exit(0)
+        else:
+            if verbosity > 0:
+                print("No COM ports found.")
+            exit(0)
+
+    # Open UDP socket
+    out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # Open serial port to communicate to miniRD
+    s_port = serial.Serial(port=valid_port, baudrate=9600, timeout=5)
+    if verbosity > 0:
+        print(f'MiniRD server started at {time.strftime("%H:%M:%S", time.localtime())}')
+        print(f'UDP stream to {local_ip}:{run8port}')
+
+    # prime the pump
+    s_port.write(b'r\r\n')
+    in_line = s_port.readline().decode('utf-8')
+    last_message = list(map(int, in_line.split(',')))
+    previous_time = time.time()
+
+    # message structure for reading values from the controller:
+    # <auto_brake>, <indy_brake>, <dynamic_brake>, <throttle> (values between 0-255)
+    # <reverser>, <counter> (values between 0 and 2)
+    # <pb0>, <pb_1>, <pb_2>, <pb_3>, <pb_4>, <pb_5>, <pb_6>, <pb_7> (values 0 or 1)
+    
+    while True:
+        s_port.write(b'r\r\n')                                   # Ask arduino for a status string
+        in_line = s_port.readline().decode('utf-8')              # Read status values
+        current_message = list(map(int, in_line.split(',')))     # Convert to list
+    
+        # Service the auto_alerter function if necessary
+        if auto_alerter:
+            if time.time() - previous_time > alerter_time:
+                if time.time() - previous_time > alerter_time + .1:     # Keep the alerter pressed for ~0.1s
+                    alerter_pressed = False
+                    previous_time = time.time()
+                    update_raw_state(out_sock, run8.cmd_alerter, off, quiet=True)
+                elif not alerter_pressed:
+                    alerter_pressed = True
+                    update_raw_state(out_sock, run8.cmd_alerter, on, quiet=True)
+    
+        # Walk through each element in status string and service those which have changed
+        for i in range(len(current_message)):
+            if current_message[i] != last_message[i]:
+                last_message[i] = current_message[i]     # Push current status value into previous list
+    
+                if run8.cmd_list[i] == run8.cmd_throttle:
+                    requested_throttle = int(current_message[i] // (256/9))     # Max value divided by number of notches
+                    if requested_throttle != previous_throttle:
+                        previous_throttle = requested_throttle
+                        update_state(out_sock, i, previous_throttle, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_indy_brake:
+                    requested_indy = current_message[i]
+                    if abs(previous_indy - requested_indy) > indy_deadband:
+                        previous_indy = requested_indy
+                        update_state(out_sock, i, 255 - previous_indy, v_lvl=verbosity)    # "Reverse" direction of indy lever output
+    
+                elif run8.cmd_list[i] == run8.cmd_auto_brake:
+                    requested_auto = current_message[i]
+                    if abs(previous_auto - requested_auto) > auto_deadband:
+                        previous_auto = current_message[i]
+                        if previous_auto <= auto_deadband:
+                            previous_auto = 0   # Assure hitting the "release" value
+                        update_state(out_sock, i, previous_auto, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_dyn_brake:
+                    requested_dyn = current_message[i]
+                    if abs(previous_dyn - requested_dyn) > auto_deadband:
+                        previous_dyn = requested_dyn
+                        if previous_dyn <= dyn_deadband:
+                            previous_dyn = 0
+                        update_state(out_sock, i, previous_dyn, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_reverser:
+                    if current_message[i] == reverser_reverse:
+                        if previous_reverser != reverser_reverse:
+                            update_state(out_sock, i, run8.reverser_reverse, v_lvl=verbosity)
+                            previous_reverser = reverser_reverse
+                    elif current_message[i] == reverser_forward:
+                        if previous_reverser != reverser_forward:
+                            update_state(out_sock, i, run8.reverser_forward, v_lvl=verbosity)
+                            previous_reverser = reverser_forward
+                    else:
+                        if previous_reverser != reverser_neutral:
+                            update_state(out_sock, i, run8.reverser_neutral, v_lvl=verbosity)
+                            previous_reverser = reverser_neutral
+    
+                elif run8.cmd_list[i] == run8.cmd_wiper and current_message[i] == button_down:
+                    if alt_key_pressed(current_message):
+                        step_light_value = int(not step_light_value)
+                        update_raw_state(out_sock, run8.cmd_step_light, step_light_value)
+                    else:
+                        wiper_value += 1
+                        if wiper_value > 3:     # wiper has value in range 0,3 (inclusive)
+                            wiper_value = 0
+                        update_state(out_sock, i, wiper_value, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_sand and current_message[i] == button_down:
+                    if alt_key_pressed(current_message):
+                        gauge_light_value = int(not gauge_light_value)
+                        update_raw_state(out_sock, run8.cmd_gauge_light, gauge_light_value)
+                    else:
+                        sand_value = int(not sand_value)
+                        update_state(out_sock, i, sand_value, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_headlight_front and current_message[i] == button_down:
+                    if alt_key_pressed(current_message):
+                        cab_light_value = int(not cab_light_value)
+                        update_raw_state(out_sock, run8.cmd_cab_light, cab_light_value)
+                    else:
+                        front_headlight_value += 1
+                        if front_headlight_value > 2:   # Headlight has value 0,2 (inclusive)
+                            front_headlight_value = 0
+                        update_state(out_sock, i, front_headlight_value, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_headlight_rear and current_message[i] == button_down:
+                    if alt_key_pressed(current_message):
+                        slow_speed_value = int(not slow_speed_value)
+                        update_raw_state(out_sock, run8.cmd_slow_speed_toggle, slow_speed_value)
+                    else:
+                        rear_headlight_value += 1
+                        if rear_headlight_value > 2:    # Headlight has value 0,2 (inclusive)
+                            rear_headlight_value = 0
+                        update_state(out_sock, i, rear_headlight_value, v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_counter:
+                    if alt_key_pressed(current_message):
+                        if current_message[i] == counter_down:
+                            update_raw_state(out_sock, run8.cmd_park_brake_rel, on)
+                        elif current_message[i] == counter_up:
+                            update_raw_state(out_sock, run8.cmd_park_break_set, on)
+                        else:
+                            update_raw_state(out_sock, run8.cmd_park_break_set, off)
+                            update_raw_state(out_sock, run8.cmd_park_brake_rel, off)
+                    else:
+                        if previous_counter != current_message[i]:
+                            update_state(out_sock, i, current_message[i], v_lvl=verbosity)
+                            previous_counter = current_message[i]
+
+    
+                elif run8.cmd_list[i] == run8.cmd_horn:
+                    if alt_key_pressed(current_message):
+                        # No alt function defined yet
+                        pass
+                    else:
+                        update_state(out_sock, i, current_message[i], v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_bell:
+                    if alt_key_pressed(current_message):
+                        # No alt function defined yet
+                        pass
+                    else:
+                        update_state(out_sock, i, current_message[i], v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_alerter:
+                    update_state(out_sock, i, current_message[i], v_lvl=verbosity)
+    
+                elif run8.cmd_list[i] == run8.cmd_bail:
+                    if alt_key_pressed(current_message):
+                        if not bool(current_message[i]):
+                            auto_alerter = not auto_alerter
+                            if verbosity > 1:
+                                print(f'auto_alerter : {auto_alerter}')
+                    else:
+                        update_state(out_sock, i, current_message[i], v_lvl=verbosity)
+    
+                else:
+                    pass
+
+
+if __name__ == "__main__":
+    main()
