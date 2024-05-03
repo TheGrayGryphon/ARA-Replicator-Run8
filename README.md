@@ -7,3 +7,5 @@ Included in this repo:
 4. Finally, some details on the mechanical bits including a layout of the button / lever mapping and links to the OnShape 3D model used to 3D-print the stand itself: https://cad.onshape.com/documents/ee68d1fb4ee2b8880d44aae3/w/7c6829b5f97449183b040dd5/e/efcd98333ec3d0d73e2c39b0?renderMode=0&uiState=66354b10b6c61859b259346e
 
 ![image](https://github.com/sjstein/miniRDproject/assets/33467117/7855ebe9-4549-40e4-a066-8fe113140b96)
+
+See https://youtu.be/2jeVMYr9WaY?si=O1BfRgeKVzKorJtD for early demo.
