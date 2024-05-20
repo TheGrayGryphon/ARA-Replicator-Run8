@@ -76,7 +76,7 @@ def alt_key_pressed(msg):
 def find_com_ports():
     com_ports = []
     for port in serial.tools.list_ports.comports():
-        com_ports.append(port.device)
+        com_ports.insert(0, port.device)
     return com_ports
 
 
@@ -148,6 +148,7 @@ def main():
                             print(f'Found miniRD on {port}, firmware version: {in_line[1]}')
                         t_port.close()
                         valid_port = port
+                        break
                     else:
                         if verbosity > 0:
                             print(f'Valid port found at {port}, but no miniRD responding.')
@@ -214,7 +215,8 @@ def main():
                     requested_indy = current_message[i]
                     if abs(previous_indy - requested_indy) > indy_deadband:
                         previous_indy = requested_indy
-                        update_state(out_sock, i, 255 - previous_indy, v_lvl=verbosity)    # "Reverse" direction of indy lever output
+                        # "Reverse" direction of indy lever output
+                        update_state(out_sock, i, 255 - previous_indy, v_lvl=verbosity)
     
                 elif run8.cmd_list[i] == run8.cmd_auto_brake:
                     requested_auto = current_message[i]
@@ -298,7 +300,6 @@ def main():
                             update_state(out_sock, i, current_message[i], v_lvl=verbosity)
                             previous_counter = current_message[i]
 
-    
                 elif run8.cmd_list[i] == run8.cmd_horn:
                     if alt_key_pressed(current_message):
                         # No alt function defined yet
