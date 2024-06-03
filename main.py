@@ -13,6 +13,7 @@ local_ip = '127.0.0.1'  # Run 8 only listens on local loopback interface
 indy_deadband = 2
 auto_deadband = 2
 dyn_deadband = 2
+throttle_delta = 10
 
 # "Constants" for readability
 button_up = 0
@@ -88,6 +89,10 @@ def main():
     previous_throttle = 0
     previous_reverser = 2
     previous_counter = 0
+    previous_tval = 0
+    requested_notch = 0
+    previous_notch = 0
+
 
     # Keep track of latching / multivalued buttons
     wiper_value = 0
@@ -206,11 +211,33 @@ def main():
                 last_message[i] = current_message[i]     # Push current status value into previous list
     
                 if run8.cmd_list[i] == run8.cmd_throttle:
-                    requested_throttle = int(current_message[i] // (256/9))     # Max value divided by number of notches
-                    if requested_throttle != previous_throttle:
-                        previous_throttle = requested_throttle
-                        update_state(out_sock, i, previous_throttle, v_lvl=verbosity)
-    
+                    tval = current_message[i]
+                    # print(f'got throttle: {tval} with previous throttle: {previous_tval}')
+                    if abs(tval - previous_tval) > throttle_delta:       # Increasing notch
+                        if 0 < tval < (256 // 9) * 1:
+                            requested_notch = 0
+                        elif (256 // 9) * 1 < tval < (256 // 9) * 2:
+                            requested_notch = 1
+                        elif (256 // 9) * 2 < tval < (256 // 9) * 3:
+                            requested_notch = 2
+                        elif (256 // 9) * 3 < tval < (256 // 9) * 4:
+                            requested_notch = 3
+                        elif (256 // 9) * 4 < tval < (256 // 9) * 5:
+                            requested_notch = 4
+                        elif (256 // 9) * 5 < tval < (256 // 9) * 6:
+                            requested_notch = 5
+                        elif (256 // 9) * 6 < tval < (256 // 9) * 7:
+                            requested_notch = 6
+                        elif (256 // 9) * 7 < tval < (256 // 9) * 8:
+                            requested_notch = 7
+                        elif (256 // 9) * 8 < tval < (256 // 9) * 9:
+                            requested_notch = 8
+                        if requested_notch != previous_notch:
+                            previous_notch = requested_notch
+                            # print(f'Throttle update: {previous_notch}')
+                            update_state(out_sock, i, previous_notch, v_lvl=verbosity)
+                        previous_tval = tval
+
                 elif run8.cmd_list[i] == run8.cmd_indy_brake:
                     requested_indy = current_message[i]
                     if abs(previous_indy - requested_indy) > indy_deadband:
