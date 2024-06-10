@@ -1,4 +1,5 @@
 import argparse
+import json
 import run8
 import serial
 import serial.tools.list_ports
@@ -9,11 +10,14 @@ import time
 run8port = 7766  # Must match Run 8 value in UI
 local_ip = '127.0.0.1'  # Run 8 only listens on local loopback interface
 
+# File info
+cal_fname = 'miniRD.cal'
+
 # Deadband values to minimize propagating noise
-indy_deadband = 2
-auto_deadband = 2
-dyn_deadband = 2
-throttle_delta = 10
+indy_deadband = 1
+auto_deadband = 1
+dyn_deadband = 1
+throttle_delta = 10  # Range band to indicate notches
 
 # "Constants" for readability
 button_up = 0
@@ -26,6 +30,7 @@ reverser_reverse = 0
 counter_up = 1
 counter_release = 0
 counter_down = 2
+r8max_val = 255  # Highest number run8 will accept in UDP stream
 
 # The miniRD uses an ADC input for toggle switches with resistor voltage divider; these values define breakpoints
 toggle_back = 50
@@ -81,7 +86,34 @@ def find_com_ports():
     return com_ports
 
 
+def scale(lever, value, calibration):
+    lval = int(calibration[lever]['min'])
+    hval = int(calibration[lever]['max'])
+    scaled_val = int(r8max_val * (value / (hval - lval)))
+    if scaled_val < 0:
+        # print(f'** Warning ** {lever} value out of bounds ({scaled_val}), consider recalibrating')
+        scaled_val = 0
+    elif scaled_val > r8max_val:
+        # print(f'** Warning ** {lever} value out of bounds ({scaled_val}), consider recalibrating')
+        scaled_val = 255
+    return scaled_val
+
+
 def main():
+    # Open calibration file and load data
+    try:
+        fp = open(cal_fname, 'r')
+    except FileNotFoundError:
+        print('Calibration file not found - creating default')
+        calib_data = {'auto': {'min': 0, 'max': 1023}, 'indy': {'min': 0, 'max': 1023},
+                      'dyn': {'min': 0, 'max': 1023}, 'thr': {'min': 0, 'max': 1023}}
+        fp = open(cal_fname, 'w')
+        json_object = json.dumps(calib_data, indent=4)
+        fp.write(json_object)
+        fp.close()
+        fp = open(cal_fname, 'r')
+    calib_data = json.load(fp)
+
     # Keep track of lever positions
     previous_indy = 255
     previous_auto = 0
@@ -89,10 +121,9 @@ def main():
     previous_throttle = 0
     previous_reverser = 2
     previous_counter = 0
-    previous_tval = 0
+    previous_throttle_val = 0
     requested_notch = 0
     previous_notch = 0
-
 
     # Keep track of latching / multivalued buttons
     wiper_value = 0
@@ -116,9 +147,11 @@ def main():
                         default=None, type=str)
     parser.add_argument('-v', '--verbosity', help=f'Verbosity level 0 (silent) to 3 (most verbose).',
                         type=int, default=0)
+    parser.add_argument('-c', '--cal', help=f'Perform a calibration. \n.', action='store_true')
     args = parser.parse_args()
     valid_port = args.port
     verbosity = args.verbosity
+    perform_cal = args.cal
 
     # Find valid COM port
     if not valid_port:
@@ -139,7 +172,7 @@ def main():
 
                 if trying_port:
                     try:
-                        t_port.write(b'I\r\n')
+                        t_port.write(b'I\r\n')  # noqa
                     except serial.SerialTimeoutException:
                         if verbosity > 0:
                             print('Timeout')
@@ -178,89 +211,125 @@ def main():
         print(f'MiniRD server started at {time.strftime("%H:%M:%S", time.localtime())}')
         print(f'UDP stream to {local_ip}:{run8port}')
 
-    # prime the pump
+    # prime the pump - populate the last_messsage list
     s_port.write(b'r\r\n')
     in_line = s_port.readline().decode('utf-8')
     last_message = list(map(int, in_line.split(',')))
     previous_time = time.time()
 
+    if perform_cal:
+        s_port.write(b'r\r\n')
+        in_line = s_port.readline().decode('utf-8')
+        print('Performing calibration...')
+        input('Move all levers to one extreme and press return')
+        time.sleep(1)
+        s_port.write(b'r\r\n')
+        in_line = s_port.readline().decode('utf-8')
+        current_message = list(map(int, in_line.split(',')))
+        auto_v1 = int(current_message[0])
+        indy_v1 = int(current_message[1])
+        dyn_v1 = int(current_message[2])
+        thr_v1 = int(current_message[3])
+        input('Move all levers to the other extreme and press return')
+        time.sleep(1)
+        s_port.write(b'r\r\n')
+        in_line = s_port.readline().decode('utf-8')
+        current_message = list(map(int, in_line.split(',')))
+        auto_v2 = int(current_message[0])
+        indy_v2 = int(current_message[1])
+        dyn_v2 = int(current_message[2])
+        thr_v2 = int(current_message[3])
+        print(f'Calibration complete\nOld: {calib_data}')
+        calib_data['auto']['min'] = min(auto_v1, auto_v2)
+        calib_data['auto']['max'] = max(auto_v1, auto_v2)
+        calib_data['indy']['min'] = min(indy_v1, indy_v2)
+        calib_data['indy']['max'] = max(indy_v1, indy_v2)
+        calib_data['dyn']['min'] = min(dyn_v1, dyn_v2)
+        calib_data['dyn']['max'] = max(dyn_v1, dyn_v2)
+        calib_data['thr']['min'] = min(thr_v1, thr_v2)
+        calib_data['thr']['max'] = max(thr_v1, thr_v2)
+        print(f'New: {calib_data}')
+        fp = open(cal_fname, 'w')
+        json_object = json.dumps(calib_data, indent=4)
+        fp.write(json_object)
+        fp.close()
+        print(f'----------\nNew Calibration data saved to {cal_fname}\n------------\nRestarting daemon')
+
     # message structure for reading values from the controller:
     # <auto_brake>, <indy_brake>, <dynamic_brake>, <throttle> (values between 0-255)
     # <reverser>, <counter> (values between 0 and 2)
     # <pb0>, <pb_1>, <pb_2>, <pb_3>, <pb_4>, <pb_5>, <pb_6>, <pb_7> (values 0 or 1)
-    
+
     while True:
-        s_port.write(b'r\r\n')                                   # Ask arduino for a status string
-        in_line = s_port.readline().decode('utf-8')              # Read status values
-        current_message = list(map(int, in_line.split(',')))     # Convert to list
-    
+        s_port.write(b'r\r\n')  # Ask arduino for a status string
+        in_line = s_port.readline().decode('utf-8')  # Read status values
+        current_message = list(map(int, in_line.split(',')))  # Convert to list
+
         # Service the auto_alerter function if necessary
         if auto_alerter:
             if time.time() - previous_time > alerter_time:
-                if time.time() - previous_time > alerter_time + .1:     # Keep the alerter pressed for ~0.1s
+                if time.time() - previous_time > alerter_time + .1:  # Keep the alerter pressed for ~0.1s
                     alerter_pressed = False
                     previous_time = time.time()
                     update_raw_state(out_sock, run8.cmd_alerter, off, quiet=True)
                 elif not alerter_pressed:
                     alerter_pressed = True
                     update_raw_state(out_sock, run8.cmd_alerter, on, quiet=True)
-    
+
         # Walk through each element in status string and service those which have changed
         for i in range(len(current_message)):
             if current_message[i] != last_message[i]:
-                last_message[i] = current_message[i]     # Push current status value into previous list
-    
+                last_message[i] = current_message[i]  # Push current status value into previous list
                 if run8.cmd_list[i] == run8.cmd_throttle:
-                    tval = current_message[i]
-                    # print(f'got throttle: {tval} with previous throttle: {previous_tval}')
-                    if abs(tval - previous_tval) > throttle_delta:       # Increasing notch
-                        if 0 < tval < (256 // 9) * 1:
+                    throttle_val = scale('thr', current_message[i], calib_data)
+                    # print(f'got throttle: {throttle_val} with previous throttle: {previous_throttle_val}')
+                    if abs(throttle_val - previous_throttle_val) > throttle_delta:  # Increasing notch
+                        if 0 < throttle_val < (256 // 9) * 1:
                             requested_notch = 0
-                        elif (256 // 9) * 1 < tval < (256 // 9) * 2:
+                        elif (256 // 9) * 1 < throttle_val < (256 // 9) * 2:
                             requested_notch = 1
-                        elif (256 // 9) * 2 < tval < (256 // 9) * 3:
+                        elif (256 // 9) * 2 < throttle_val < (256 // 9) * 3:
                             requested_notch = 2
-                        elif (256 // 9) * 3 < tval < (256 // 9) * 4:
+                        elif (256 // 9) * 3 < throttle_val < (256 // 9) * 4:
                             requested_notch = 3
-                        elif (256 // 9) * 4 < tval < (256 // 9) * 5:
+                        elif (256 // 9) * 4 < throttle_val < (256 // 9) * 5:
                             requested_notch = 4
-                        elif (256 // 9) * 5 < tval < (256 // 9) * 6:
+                        elif (256 // 9) * 5 < throttle_val < (256 // 9) * 6:
                             requested_notch = 5
-                        elif (256 // 9) * 6 < tval < (256 // 9) * 7:
+                        elif (256 // 9) * 6 < throttle_val < (256 // 9) * 7:
                             requested_notch = 6
-                        elif (256 // 9) * 7 < tval < (256 // 9) * 8:
+                        elif (256 // 9) * 7 < throttle_val < (256 // 9) * 8:
                             requested_notch = 7
-                        elif (256 // 9) * 8 < tval < (256 // 9) * 9:
+                        elif (256 // 9) * 8 < throttle_val < (256 // 9) * 9:
                             requested_notch = 8
                         if requested_notch != previous_notch:
                             previous_notch = requested_notch
                             # print(f'Throttle update: {previous_notch}')
                             update_state(out_sock, i, previous_notch, v_lvl=verbosity)
-                        previous_tval = tval
-
+                        previous_throttle_val = throttle_val
                 elif run8.cmd_list[i] == run8.cmd_indy_brake:
-                    requested_indy = current_message[i]
+                    requested_indy = scale('indy', int(current_message[i]), calib_data)
                     if abs(previous_indy - requested_indy) > indy_deadband:
                         previous_indy = requested_indy
                         # "Reverse" direction of indy lever output
-                        update_state(out_sock, i, 255 - previous_indy, v_lvl=verbosity)
-    
+                        rev_indy = 255 - previous_indy
+                        if rev_indy < 0:
+                            rev_indy = 0
+                        update_state(out_sock, i, rev_indy, v_lvl=verbosity)
                 elif run8.cmd_list[i] == run8.cmd_auto_brake:
-                    requested_auto = current_message[i]
+                    requested_auto = scale('auto', int(current_message[i]), calib_data)
                     if abs(previous_auto - requested_auto) > auto_deadband:
-                        previous_auto = current_message[i]
+                        previous_auto = requested_auto
                         if previous_auto <= auto_deadband:
-                            previous_auto = 0   # Assure hitting the "release" value
+                            previous_auto = 0  # Assure hitting the "release" value
                         update_state(out_sock, i, previous_auto, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_dyn_brake:
-                    requested_dyn = current_message[i]
+                    requested_dyn = scale('dyn', int(current_message[i]), calib_data)
                     if abs(previous_dyn - requested_dyn) > auto_deadband:
                         previous_dyn = requested_dyn
                         if previous_dyn <= dyn_deadband:
                             previous_dyn = 0
                         update_state(out_sock, i, previous_dyn, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_reverser:
                     if current_message[i] == reverser_reverse:
                         if previous_reverser != reverser_reverse:
@@ -274,17 +343,15 @@ def main():
                         if previous_reverser != reverser_neutral:
                             update_state(out_sock, i, run8.reverser_neutral, v_lvl=verbosity)
                             previous_reverser = reverser_neutral
-    
                 elif run8.cmd_list[i] == run8.cmd_wiper and current_message[i] == button_down:
                     if alt_key_pressed(current_message):
                         step_light_value = int(not step_light_value)
                         update_raw_state(out_sock, run8.cmd_step_light, step_light_value)
                     else:
                         wiper_value += 1
-                        if wiper_value > 3:     # wiper has value in range 0,3 (inclusive)
+                        if wiper_value > 3:  # wiper has value in range 0,3 (inclusive)
                             wiper_value = 0
                         update_state(out_sock, i, wiper_value, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_sand and current_message[i] == button_down:
                     if alt_key_pressed(current_message):
                         gauge_light_value = int(not gauge_light_value)
@@ -292,27 +359,24 @@ def main():
                     else:
                         sand_value = int(not sand_value)
                         update_state(out_sock, i, sand_value, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_headlight_front and current_message[i] == button_down:
                     if alt_key_pressed(current_message):
                         cab_light_value = int(not cab_light_value)
                         update_raw_state(out_sock, run8.cmd_cab_light, cab_light_value)
                     else:
                         front_headlight_value += 1
-                        if front_headlight_value > 2:   # Headlight has value 0,2 (inclusive)
+                        if front_headlight_value > 2:  # Headlight has value 0,2 (inclusive)
                             front_headlight_value = 0
                         update_state(out_sock, i, front_headlight_value, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_headlight_rear and current_message[i] == button_down:
                     if alt_key_pressed(current_message):
                         slow_speed_value = int(not slow_speed_value)
                         update_raw_state(out_sock, run8.cmd_slow_speed_toggle, slow_speed_value)
                     else:
                         rear_headlight_value += 1
-                        if rear_headlight_value > 2:    # Headlight has value 0,2 (inclusive)
+                        if rear_headlight_value > 2:  # Headlight has value 0,2 (inclusive)
                             rear_headlight_value = 0
                         update_state(out_sock, i, rear_headlight_value, v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_counter:
                     if alt_key_pressed(current_message):
                         if current_message[i] == counter_down:
@@ -326,24 +390,20 @@ def main():
                         if previous_counter != current_message[i]:
                             update_state(out_sock, i, current_message[i], v_lvl=verbosity)
                             previous_counter = current_message[i]
-
                 elif run8.cmd_list[i] == run8.cmd_horn:
                     if alt_key_pressed(current_message):
                         # No alt function defined yet
                         pass
                     else:
                         update_state(out_sock, i, current_message[i], v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_bell:
                     if alt_key_pressed(current_message):
                         # No alt function defined yet
                         pass
                     else:
                         update_state(out_sock, i, current_message[i], v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_alerter:
                     update_state(out_sock, i, current_message[i], v_lvl=verbosity)
-    
                 elif run8.cmd_list[i] == run8.cmd_bail:
                     if alt_key_pressed(current_message):
                         if not bool(current_message[i]):
@@ -352,7 +412,6 @@ def main():
                                 print(f'auto_alerter : {auto_alerter}')
                     else:
                         update_state(out_sock, i, current_message[i], v_lvl=verbosity)
-    
                 else:
                     pass
 

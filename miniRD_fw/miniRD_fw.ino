@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
 // "Firmware" version info
-const String version = "0502a";
+const String version = "0605a";
 
 // Analog break-point values for three-way switch inputs
 const int low_bp = 250;
@@ -222,13 +222,13 @@ void loop()
   if (Serial.available() > 0) {
     incomingByte = Serial.read();
       if (incomingByte == 'r') {  // read request
-        Serial.print(scale(auto_val));
+        Serial.print(auto_val);
         Serial.print(",");
-        Serial.print(scale(indy_val));
+        Serial.print(indy_val);
         Serial.print(",");
-        Serial.print(scale(dynamic_val));
+        Serial.print(dynamic_val);
         Serial.print(",");
-        Serial.print(scale(throttle_val));
+        Serial.print(throttle_val);
         Serial.print(",");
         Serial.print(reverser_pos);
         Serial.print(",");

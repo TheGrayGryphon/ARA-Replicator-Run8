@@ -1,0 +1,10 @@
+.idea/
+__pycache__/
+venv/
+
+*.cal
+
+miniRD_fw/build/
+miniRD_fw/.theia/
+
+miniRDkicad/miniRDkicad-backups/
