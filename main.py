@@ -139,6 +139,8 @@ def main():
     auto_alerter = False
     alerter_pressed = False
 
+    perform_cal = False
+
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Python script to serve as miniRD daemon',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -147,11 +149,9 @@ def main():
                         default=None, type=str)
     parser.add_argument('-v', '--verbosity', help=f'Verbosity level 0 (silent) to 3 (most verbose).',
                         type=int, default=0)
-    parser.add_argument('-c', '--cal', help=f'Perform a calibration. \n.', action='store_true')
     args = parser.parse_args()
     valid_port = args.port
     verbosity = args.verbosity
-    perform_cal = args.cal
 
     # Find valid COM port
     if not valid_port:
@@ -217,50 +217,56 @@ def main():
     last_message = list(map(int, in_line.split(',')))
     previous_time = time.time()
 
-    if perform_cal:
-        s_port.write(b'r\r\n')
-        in_line = s_port.readline().decode('utf-8')
-        print('Performing calibration...')
-        input('Move all levers to one extreme and press return')
-        time.sleep(1)
-        s_port.write(b'r\r\n')
-        in_line = s_port.readline().decode('utf-8')
-        current_message = list(map(int, in_line.split(',')))
-        auto_v1 = int(current_message[0])
-        indy_v1 = int(current_message[1])
-        dyn_v1 = int(current_message[2])
-        thr_v1 = int(current_message[3])
-        input('Move all levers to the other extreme and press return')
-        time.sleep(1)
-        s_port.write(b'r\r\n')
-        in_line = s_port.readline().decode('utf-8')
-        current_message = list(map(int, in_line.split(',')))
-        auto_v2 = int(current_message[0])
-        indy_v2 = int(current_message[1])
-        dyn_v2 = int(current_message[2])
-        thr_v2 = int(current_message[3])
-        print(f'Calibration complete\nOld: {calib_data}')
-        calib_data['auto']['min'] = min(auto_v1, auto_v2)
-        calib_data['auto']['max'] = max(auto_v1, auto_v2)
-        calib_data['indy']['min'] = min(indy_v1, indy_v2)
-        calib_data['indy']['max'] = max(indy_v1, indy_v2)
-        calib_data['dyn']['min'] = min(dyn_v1, dyn_v2)
-        calib_data['dyn']['max'] = max(dyn_v1, dyn_v2)
-        calib_data['thr']['min'] = min(thr_v1, thr_v2)
-        calib_data['thr']['max'] = max(thr_v1, thr_v2)
-        print(f'New: {calib_data}')
-        fp = open(cal_fname, 'w')
-        json_object = json.dumps(calib_data, indent=4)
-        fp.write(json_object)
-        fp.close()
-        print(f'----------\nNew Calibration data saved to {cal_fname}\n------------\nRestarting daemon')
-
     # message structure for reading values from the controller:
     # <auto_brake>, <indy_brake>, <dynamic_brake>, <throttle> (values between 0-255)
     # <reverser>, <counter> (values between 0 and 2)
     # <pb0>, <pb_1>, <pb_2>, <pb_3>, <pb_4>, <pb_5>, <pb_6>, <pb_7> (values 0 or 1)
 
     while True:
+        if perform_cal:
+            print(f'--------------------\n[{time.strftime("%H:%M:%S", time.localtime())}] '
+                  f'MiniRD Recalibration requested\n--------------------\n')
+            input(f'[{time.strftime("%H:%M:%S", time.localtime())}] '
+                  f'--> Move all levers to one extreme and press return')
+            print(f'[{time.strftime("%H:%M:%S", time.localtime())}] <-- Reading current lever values')
+            time.sleep(1)
+            s_port.write(b'r\r\n')
+            in_line = s_port.readline().decode('utf-8')
+            current_message = list(map(int, in_line.split(',')))
+            auto_v1 = int(current_message[0])
+            indy_v1 = int(current_message[1])
+            dyn_v1 = int(current_message[2])
+            thr_v1 = int(current_message[3])
+            input(f'[{time.strftime("%H:%M:%S", time.localtime())}] '
+                  f'--> Move all levers to their other extremes and press return')
+            print(f'[{time.strftime("%H:%M:%S", time.localtime())}] <-- Reading current lever values')
+            time.sleep(1)
+            s_port.write(b'r\r\n')
+            in_line = s_port.readline().decode('utf-8')
+            current_message = list(map(int, in_line.split(',')))
+            auto_v2 = int(current_message[0])
+            indy_v2 = int(current_message[1])
+            dyn_v2 = int(current_message[2])
+            thr_v2 = int(current_message[3])
+            print(f'--------------------\n[{time.strftime("%H:%M:%S", time.localtime())}] '
+                  f'MiniRD Recalibration completed\n--------------------')
+            print(f'Old calibration: {calib_data}')
+            calib_data['auto']['min'] = min(auto_v1, auto_v2)
+            calib_data['auto']['max'] = max(auto_v1, auto_v2)
+            calib_data['indy']['min'] = min(indy_v1, indy_v2)
+            calib_data['indy']['max'] = max(indy_v1, indy_v2)
+            calib_data['dyn']['min'] = min(dyn_v1, dyn_v2)
+            calib_data['dyn']['max'] = max(dyn_v1, dyn_v2)
+            calib_data['thr']['min'] = min(thr_v1, thr_v2)
+            calib_data['thr']['max'] = max(thr_v1, thr_v2)
+            print(f'New calibration: {calib_data}')
+            fp = open(cal_fname, 'w')
+            json_object = json.dumps(calib_data, indent=4)
+            fp.write(json_object)
+            fp.close()
+            print(f'----------\nNew Calibration data saved to {cal_fname}\nRestarting daemon\n------------')
+            perform_cal = False
+
         s_port.write(b'r\r\n')  # Ask arduino for a status string
         in_line = s_port.readline().decode('utf-8')  # Read status values
         current_message = list(map(int, in_line.split(',')))  # Convert to list
@@ -392,7 +398,7 @@ def main():
                             previous_counter = current_message[i]
                 elif run8.cmd_list[i] == run8.cmd_horn:
                     if alt_key_pressed(current_message):
-                        # No alt function defined yet
+                        perform_cal = True
                         pass
                     else:
                         update_state(out_sock, i, current_message[i], v_lvl=verbosity)
