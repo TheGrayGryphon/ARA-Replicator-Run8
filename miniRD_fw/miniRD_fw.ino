@@ -1,27 +1,33 @@
 #include <Arduino.h>
 
 // "Firmware" version info
-const String version = "0605a";
+const String version = "0225a";
 
 // Analog break-point values for three-way switch inputs
+// The three way switches (reverse, counter) use a voltage divider to signal their positions.
+// The values below define how we determine the switch positions. 
 const int low_bp = 250;
 const int high_bp = 750;
 
 // Hardware pin locations
+// NOTE: The actual translation of these inputs to the UDP stream sent to the game client is defined in the 
+//   miniRD server code.
+// These are specific to the model of Arduino/ESP board being used
 int autoBrakePin = A0;
 int indyBrakePin = A1;
 int dynamicBrakePin = A2;
 int throttlePin = A3;
 int reverserPin = A4;
 int counterPin = A5;
-int pb0Pin = 0;
-int pb1Pin = 1;
-int pb2Pin = 5;
-int pb3Pin = 7;
-int pb4Pin = 9;
-int pb5Pin = 10;
-int pb6Pin = 11;
-int pb7Pin = 12;
+// generic "pb" names are used here, but the original intended functions are shown in comments
+int pb0Pin = 0;   // Bail 
+int pb1Pin = 1;   // Horn
+int pb2Pin = 5;   // Bell
+int pb3Pin = 7;   // Front headlight
+int pb4Pin = 9;   // Rear headlight
+int pb5Pin = 10;  // Wiper toggle
+int pb6Pin = 11;  // Sander
+int pb7Pin = 12;  // Alerter
 
 // Last known update value for analog inputs
 int prev_auto_val = 0;
@@ -38,8 +44,8 @@ int reverser_val = 0;
 int counter_val = 0;
 
 // Enumerate reverser and counter (analog input) to integers
-int reverser_pos, prev_reverser_pos = 1; // 0 = reverse, 2 = neutral, 1 = fwd
-int counter_pos, prev_counter_pos = 0; // 2 = count down, 0 = center, 1 = count up (corresponds to Run8 API)
+int reverser_pos, prev_reverser_pos = 1;  // 0 = reverse, 2 = neutral, 1 = fwd
+int counter_pos, prev_counter_pos = 0;    // 2 = count down, 0 = center, 1 = count up (corresponds to Run8 API)
 
 // pushbutton values (current and last)
 bool pb0_val, pb0_lval = false;
