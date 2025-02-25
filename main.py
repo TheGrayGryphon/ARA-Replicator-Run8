@@ -89,7 +89,13 @@ def find_com_ports():
 def scale(lever, value, calibration):
     lval = int(calibration[lever]['min'])
     hval = int(calibration[lever]['max'])
-    scaled_val = int(r8max_val * (value / (hval - lval)))
+    try:
+        scaled_val = int(r8max_val * ((value - lval) / (hval - lval)))
+
+    except ZeroDivisionError:
+        print('It appears your calibration file is corrupt. Please delete the file miniRD.cal and re-run the daemon')
+        exit(-1)
+
     if scaled_val < 0:
         # print(f'** Warning ** {lever} value out of bounds ({scaled_val}), consider recalibrating')
         scaled_val = 0
@@ -142,11 +148,9 @@ def main():
     perform_cal = False
 
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Python script to serve as miniRD daemon',
+    parser = argparse.ArgumentParser(description='Python script to test com port',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-p', '--port', help='Serial (COM) port the MiniRD is connected to (optional). \n'
-                                             'If left blank, this tool will poll all available serial ports.',
-                        default=None, type=str)
+    parser.add_argument('-p', '--port', help='Serial (COM) port test', default=None, type=str)
     parser.add_argument('-v', '--verbosity', help=f'Verbosity level 0 (silent) to 3 (most verbose).',
                         type=int, default=0)
     args = parser.parse_args()
@@ -158,13 +162,15 @@ def main():
         ports = find_com_ports()
         if ports:
             if verbosity > 0:
+                print("Dev build 01a")
                 print("Available COM ports: {ports}".format(ports=ports))
             for port in ports:
                 trying_port = True
                 if verbosity > 0:
                     print(f"trying {port}:")
                 try:
-                    t_port = serial.Serial(port=port, baudrate=9600, timeout=1, write_timeout=1)
+                    t_port = serial.Serial(port=port, baudrate=9600, timeout=1)
+                    time.sleep(2)   # Delay a bit to allow port to open
                 except serial.SerialException:
                     if verbosity > 0:
                         print('Port unreachable')
@@ -172,7 +178,7 @@ def main():
 
                 if trying_port:
                     try:
-                        t_port.write(b'I\r\n')  # noqa
+                        t_port.write(b'I\n')  # noqa
                     except serial.SerialTimeoutException:
                         if verbosity > 0:
                             print('Timeout')
@@ -207,12 +213,13 @@ def main():
 
     # Open serial port to communicate to miniRD
     s_port = serial.Serial(port=valid_port, baudrate=9600, timeout=5)
+    time.sleep(2)   # delay a bit to allow port to settle
     if verbosity > 0:
         print(f'MiniRD server started at {time.strftime("%H:%M:%S", time.localtime())}')
         print(f'UDP stream to {local_ip}:{run8port}')
 
     # prime the pump - populate the last_messsage list
-    s_port.write(b'r\r\n')
+    s_port.write(b'r\n')
     in_line = s_port.readline().decode('utf-8')
     last_message = list(map(int, in_line.split(',')))
     previous_time = time.time()
@@ -230,7 +237,7 @@ def main():
                   f'--> Move all levers to one extreme and press return')
             print(f'[{time.strftime("%H:%M:%S", time.localtime())}] <-- Reading current lever values')
             time.sleep(1)
-            s_port.write(b'r\r\n')
+            s_port.write(b'r\n')
             in_line = s_port.readline().decode('utf-8')
             current_message = list(map(int, in_line.split(',')))
             auto_v1 = int(current_message[0])
@@ -241,7 +248,7 @@ def main():
                   f'--> Move all levers to their other extremes and press return')
             print(f'[{time.strftime("%H:%M:%S", time.localtime())}] <-- Reading current lever values')
             time.sleep(1)
-            s_port.write(b'r\r\n')
+            s_port.write(b'r\n')
             in_line = s_port.readline().decode('utf-8')
             current_message = list(map(int, in_line.split(',')))
             auto_v2 = int(current_message[0])
@@ -267,7 +274,7 @@ def main():
             print(f'----------\nNew Calibration data saved to {cal_fname}\nRestarting daemon\n------------')
             perform_cal = False
 
-        s_port.write(b'r\r\n')  # Ask arduino for a status string
+        s_port.write(b'r\n')  # Ask arduino for a status string
         in_line = s_port.readline().decode('utf-8')  # Read status values
         current_message = list(map(int, in_line.split(',')))  # Convert to list
 
